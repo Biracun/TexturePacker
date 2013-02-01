@@ -4,8 +4,10 @@
 #include <FreeImage.h>
 
 #ifdef _WINDOWS
+	#include <direct.h>
 	#include "dirent-win.h"
 #else
+	#include <unistd.h>
 	#include <dirent.h>
 #endif
 
@@ -28,6 +30,7 @@ struct texture_t
 struct texture_t load_texture(const char* filename);
 void unload_texture(struct texture_t texture);
 void sort_textures(struct texture_t* textures, int count);
+BOOL save_atlas(const char* output_name, const char* output_text_name, int output_width, int output_height, FREE_IMAGE_FORMAT output_format, struct texture_t* textures, int count);
 BOOL rect_overlaps(struct rect_t first, struct rect_t second);
 void freeimage_error_handler(FREE_IMAGE_FORMAT fif, const char* message);
 
@@ -48,6 +51,9 @@ int main(int argc, char** argv)
 	
 	// Counters
 	int i;
+	int atlas_count;
+	int current_texture;
+	int start_texture;
 
 	// State
 	BOOL generated = FALSE;
@@ -98,7 +104,7 @@ int main(int argc, char** argv)
 		}
 	}
 	
-	printf("Generating texture atlas from directory: %s\n", input_dir);
+	printf("Generating texture atlases from directory: %s\n", input_dir);
 	printf("Output filename: %s\n", output_name);
 	printf("Min dimensions: %d, %d\n", min_width, min_height);
 	printf("Max dimensions: %d, %d\n\n", max_width, max_height);
@@ -130,9 +136,9 @@ int main(int argc, char** argv)
 
 		// Change to texture directory
 		// Headers are not #included for getcwd and chdir as they vary between environments
-		old_dir = getcwd(current_dir, 1024);
-		chdir(input_dir);
-
+		old_dir = _getcwd(current_dir, 1024);
+		_chdir(input_dir);
+		
 		// Load textures
 		for (i = 0; i < file_count; ++i)
 		{
@@ -159,7 +165,7 @@ int main(int argc, char** argv)
 
 		// Change directory back afterwards
 		if (old_dir != NULL)
-			chdir(old_dir);
+			_chdir(old_dir);
 
 		// Close directory
 		closedir(dir);
@@ -172,144 +178,197 @@ int main(int argc, char** argv)
 	}
 
 	// Generate atlas
-	printf("Generating atlas from %d textures\n", texture_count);
+	printf("Generating atlases from %d textures\n\n", texture_count);
 	
 	// Set output texture dimensions
 	output_width = max_width;
 	output_height = max_height;
 
-	// Calculate pixel size of textures and initialise bounding rectangle widths and heights
-	for (i = 0; i < texture_count; ++i)
+	// Attempt to generate atlases
+	atlas_count = 1;
+	start_texture = 0;
+	current_texture = start_texture;
+	while (current_texture < texture_count)
 	{
-		unsigned int texture_width;
-		unsigned int texture_height;
+		unsigned int current_width, current_height;
 
-		texture_width = FreeImage_GetWidth(textures[i].dib);
-		texture_height = FreeImage_GetHeight(textures[i].dib);
-		
-		textures[i].dest.width = texture_width;
-		textures[i].dest.height = texture_height;
+		printf("Generating atlas %d\n", atlas_count);
 
-		textures[i].pixel_size = texture_width * texture_height;
-	}
+		// Save starting texture for this atlas
+		start_texture = current_texture;
 
-	// Sort textures by pixel size
-	sort_textures(textures, texture_count);
-
-	// Start at min_height and min_width and double them until we can fit all textures into the atlas
-	for (output_height = min_height; output_height <= max_height && !generated; output_height *= 2)
-	{
-		if (output_height > max_height)
-			output_height = max_height;
-
-		for (output_width = min_width; output_width <= max_width && !generated; output_width *= 2)
+		for (i = 0; i < texture_count; ++i)
 		{
-			unsigned int x;
-			unsigned int y;
-			int current_texture;
-			BOOL success;
+			unsigned int texture_width;
+			unsigned int texture_height;
 
-			if (output_width > max_width)
-				output_width = max_width;
+			texture_width = FreeImage_GetWidth(textures[i].dib);
+			texture_height = FreeImage_GetHeight(textures[i].dib);
 
-			// Attempt to generate atlas of dimensions output_width * output_height
-			printf("Attempting to generate atlas of dimensions %d, %d\n", output_width, output_height);
-
-			// Initialise bounding rectangle x and ys
-			for (i = 0; i < texture_count; ++i)
+			if (texture_width > max_width || texture_height > max_height)
 			{
-				textures[i].dest.x = 0;
-				textures[i].dest.y = 0;
+				fprintf(stderr, "Texture %s (%d, %d) too big for atlas (%d, %d)\n",
+						textures[i].filename, texture_width, texture_height, max_width, max_height);
+				printf("Generation cannot continue\n");
+
+				goto cleanup;
 			}
+		
+			textures[i].dest.width = texture_width;
+			textures[i].dest.height = texture_height;
 
-			// Fit each texture into atlas
-			success = TRUE;
-			for (current_texture = 0; current_texture < texture_count; ++current_texture)
+			textures[i].pixel_size = texture_width * texture_height;
+		}
+
+		// Sort textures by pixel size
+		sort_textures(textures, texture_count);
+
+		// Start at min_height and min_width and double them until we can fit all textures into the atlas
+		current_height = min_height;
+		for (current_height = min_height; current_height <= max_height && !generated; current_height *= 2)
+		{
+			if (current_height > max_height)
+				current_height = max_height;
+
+			output_height = current_height;
+
+			for (current_width = min_width; current_width <= max_width && !generated; current_width *= 2)
 			{
-				BOOL fitted = FALSE;
+				unsigned int x;
+				unsigned int y;
+				BOOL success;
 
-				// Iterate through scanlines
-				for (y = 0; y < output_height && !fitted; ++y)
+				if (current_width > max_width)
+					current_width = max_width;
+
+				output_width = current_width;
+				
+				// Attempt to generate atlas of dimensions current_width * current_height
+				printf("Attempting to generate atlas of dimensions %d, %d\n", current_width, current_height);
+
+				// Initialise bounding rectangle x and ys
+				for (i = 0; i < texture_count; ++i)
 				{
-					if (y + textures[current_texture].dest.height > output_height)
-						break;
+					textures[i].dest.x = 0;
+					textures[i].dest.y = 0;
+				}
 
-					// Checking each (x, y) to see if the texture will fit here
-					for (x = 0; x < output_width && !fitted; ++x)
+				// Fit each texture into atlas
+				success = TRUE;
+				for (current_texture = start_texture; current_texture < texture_count; ++current_texture)
+				{
+					BOOL fitted = FALSE;
+
+					// Iterate through scanlines
+					for (y = 0; y < current_height && !fitted; ++y)
 					{
-						BOOL overlap;
-
-						if (x + textures[current_texture].dest.width > output_width)
+						if (y + textures[current_texture].dest.height > current_height)
 							break;
 
-						textures[current_texture].dest.x = x;
-						textures[current_texture].dest.y = y;
-
-						// Iterate through previous textures and check for overlap
-						overlap = FALSE;
-						for (i = 0; i < current_texture; ++i)
+						// Checking each (x, y) to see if the texture will fit here
+						for (x = 0; x < current_width && !fitted; ++x)
 						{
-							if (rect_overlaps(textures[current_texture].dest, textures[i].dest))
-							{
-								overlap = TRUE;
+							BOOL overlap;
+
+							if (x + textures[current_texture].dest.width > current_width)
 								break;
+
+							textures[current_texture].dest.x = x;
+							textures[current_texture].dest.y = y;
+
+							// Iterate through previous textures and check for overlap
+							overlap = FALSE;
+							for (i = 0; i < current_texture; ++i)
+							{
+								if (rect_overlaps(textures[current_texture].dest, textures[i].dest))
+								{
+									overlap = TRUE;
+									break;
+								}
+							}
+
+							if (!overlap)
+							{
+								fitted = TRUE;
 							}
 						}
+					}
 
-						if (!overlap)
-						{
-							fitted = TRUE;
-						}
+					if (!fitted)
+					{
+						success = FALSE;
+
+						break;
 					}
 				}
 
-				if (!fitted)
+				if (success)
 				{
-					success = FALSE;
-
+					generated = TRUE;
 					break;
 				}
 			}
 
-			if (success)
+			if (generated)
 			{
-				generated = TRUE;
 				break;
 			}
 		}
 
-		if (generated)
+		// Save atlas (so far)
+		printf("Atlas %d %s, saving atlas...\n\n", atlas_count, (generated ? "complete" : "full"));
+
+		// Name this file output_filename + atlas_count
+		if (atlas_count > 0)
 		{
-			break;
+			// Append atlas count to filename before the file extension
+			char* base_filename;
+			char* atlas_filename;
+			char* text_filename;
+			char atlas_count_str[33];
+			
+			// Convert atlas count to string
+			_itoa(atlas_count, atlas_count_str, 10);
+
+			// Allocate memory for resultant filename string
+			base_filename = malloc((strlen(output_name) + strlen(atlas_count_str) + 1) * sizeof(char));
+
+			// Copy output filename to string
+			strcpy(base_filename, output_name);
+			
+			// Replace file extension with atlas count
+			strcpy(strstr(base_filename, "."), atlas_count_str);
+
+			// Allocate strings for actual filenames
+			atlas_filename = malloc((strlen(output_name) + strlen(atlas_count_str) + 1) * sizeof(char));
+			text_filename = malloc((strlen(base_filename) + strlen(".txt") + 1) * sizeof(char));
+
+			// Copy base filename
+			strcpy(atlas_filename, base_filename);
+			strcpy(text_filename, base_filename);
+
+			// Append original file extension
+			strcat(atlas_filename, strstr(output_name, "."));
+			strcat(text_filename, ".txt");
+
+			if (!save_atlas(atlas_filename, text_filename, output_width, output_height, output_format,
+							textures + start_texture, current_texture - 1 - start_texture))
+			{
+				fprintf(stderr, "Unable to create atlas image %s\n", output_name);
+
+				goto cleanup;
+			}
+
+			// Clean up memory
+			free(base_filename);
+			free(atlas_filename);
+			free(text_filename);
+
+			printf("\n");
 		}
-	}
 
-	// If we managed to hit max width and height without being able to build the atlas, it's a no go
-	if (!generated)
-	{
-		fprintf(stderr, "Failed to generate atlas with maximum dimensions %d, %d\n", max_width, max_height);
-
-		goto cleanup;
-	}
-
-	// Generate texture for atlas
-	printf("Creating output texture for atlas %s\n", output_name);
-
-	output_texture = FreeImage_Allocate(output_width, output_height, 32, 0, 0, 0);
-
-	for (i = 0; i < texture_count; ++i)
-	{
-		FreeImage_Paste(output_texture, textures[i].dib, textures[i].dest.x, textures[i].dest.y, 255);
-	}
-
-	// Write output texture
-	printf("Writing texture atlas to %s\n", output_name);
-
-	if (!FreeImage_Save(output_format, output_texture, output_name, 0))
-	{
-		fprintf(stderr, "Unable to save image %s\n", output_name);
-
-		goto cleanup;
+		// Increment atlas count
+		atlas_count++;
 	}
 
 cleanup:
@@ -395,6 +454,41 @@ void sort_textures(struct texture_t* textures, int count)
 		textures[x] = textures[min];
 		textures[min] = temp;
 	}
+}
+
+BOOL save_atlas(const char* output_name, const char* output_text_name, int output_width, int output_height, FREE_IMAGE_FORMAT output_format, struct texture_t* textures, int count)
+{
+	int i;
+	FIBITMAP* output_texture;
+	FILE* output_text;
+	
+	// Generate texture for atlas
+	printf("Creating output texture for atlas %s\n", output_name);
+
+	output_texture = FreeImage_Allocate(output_width, output_height, 32, 0, 0, 0);
+
+	output_text = fopen(output_text_name, "w");
+
+	for (i = 0; i < count; ++i)
+	{
+		fprintf(output_text, "\"%s\" %d %d\n", textures[i].filename, textures[i].dest.x, textures[i].dest.y);
+		FreeImage_Paste(output_texture, textures[i].dib, textures[i].dest.x, textures[i].dest.y, 255);
+	}
+
+	// Write output texture
+	printf("Writing texture atlas to %s\n", output_name);
+
+	if (!FreeImage_Save(output_format, output_texture, output_name, 0))
+	{
+		fprintf(stderr, "Unable to save image %s\n", output_name);
+
+		return FALSE;
+	}
+
+	FreeImage_Unload(output_texture);
+	fclose(output_text);
+
+	return TRUE;
 }
 
 BOOL rect_overlaps(struct rect_t first, struct rect_t second)
