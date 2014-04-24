@@ -1,4 +1,4 @@
-TexturePacker - A C API and standalone tools for packing textures into and loading textures from texture atlases
+TexturePacker - A C++ tool for packing textures into texture atlases (no API)
 
 Up to date copies of this software can be obtained from:
 
